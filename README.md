@@ -4,6 +4,16 @@
 **Qwen3.8-Flash-Next** using **Unsloth's GGUF**, specifically the
 **UD-IQ2_XS** quantization in the reference setup.
 
+## Dashboard screenshot
+
+![Strata / Qwen dashboard showing the prompt-token line chart, prefill and decode bars, draft acceptance, GPU utilization and system I/O](assets/dashboard.png)
+
+*Live dashboard snapshot captured on 2026-11-05. Prompt tokens use a line chart;
+prefill and decode use per-request bars. A lane without matching samples shows
+“No measurements in this window.” Values are an example observation, not a
+controlled performance benchmark. The screenshot contains no credentials,
+network addresses or personal usernames.*
+
 ## Inference engine and model
 
 | Component | Reference setup |
