@@ -1,7 +1,28 @@
 # Strata-qwen38fn-unslothGGUF
 
-**llm-scope:** a local telemetry dashboard for Strata serving
-Qwen3.8-Flash-Next Unsloth GGUF models.
+**llm-scope:** a local telemetry dashboard for **Strata** serving
+**Qwen3.8-Flash-Next** using **Unsloth's GGUF**, specifically the
+**UD-IQ2_XS** quantization in the reference setup.
+
+## Inference engine and model
+
+| Component | Reference setup |
+|---|---|
+| Inference engine | Strata |
+| LLM | Qwen3.8-Flash-Next (shorthand: `qwen38-flash-next`) |
+| GGUF publisher | Unsloth |
+| GGUF source | [Unsloth / Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
+| Quantization | UD-IQ2_XS, distributed as three GGUF shards |
+| Source verified as of | **2026-11-05** |
+
+The upstream GGUF repository was created on **2026-08-26** and last updated on
+**2026-11-04**, according to the Hugging Face model API when checked on
+2026-11-05. These are repository timestamps, not a verified publication date
+for each individual quantization. The GGUF was available **as of today's
+verification date**; this README does not claim it was first released that day.
+
+This repository provides telemetry tooling only. It does not bundle Strata,
+model weights, or an inference-engine installer.
 
 A zero-dependency Python collector and SVG dashboard for Strata inference logs,
 with legacy Maya/GLM parsing support. It is read-only against the inference
