@@ -1,0 +1,18 @@
+data/
+*.out
+__pycache__/
+*.pid
+
+# Local credentials, private keys, and captured telemetry
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+*.log
+*.jsonl
+*.jsonl.*
