@@ -61,7 +61,7 @@ setsid nohup python3 llm-scope.py --port 8089 > llm-scope.out 2>&1 &
 
 # Optional settings
 python3 llm-scope.py --log /path/to/engine.log --gpu 0 --disk nvme0n1 \
-  --context-cap 65536 --poll 2
+  --iface wlp147s0 --serve-port 8080 --context-cap 65536 --poll 2
 
 # Use a legacy GPU monitor log instead of nvidia-smi (not both)
 python3 llm-scope.py --monitor /path/to/gpu_monitor_log.txt
@@ -90,6 +90,8 @@ appropriate firewall/authenticated proxy. Logs can contain sensitive text.
 | GPU | Selected GPU utilization, temperature, power and memory from `nvidia-smi`; unavailable fields remain unknown |
 | PSI-IO | System-wide `avg10` full I/O pressure, not instantaneous engine I/O |
 | Disk | Selected Linux block-device read throughput, derived from sector counters |
+| Net | Interface receive/transmit kB/s, derived from `/proc/net/dev` byte counters; interface of the default route unless `--iface` is given |
+| Conns | Established TCP connections whose local port is the engine serve port (`ss`), a plain count; `--serve-port` overrides the port read from the engine run script. Connections are not users: a keep-alive client counts as one and no addresses or identities are collected |
 | Dirty | System-wide dirty memory and writeback |
 | Events | Engine lifecycle, cache operations, prompt reuse, warnings and legacy tool/refusal events |
 

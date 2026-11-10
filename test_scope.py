@@ -151,6 +151,60 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(scope.disk_counters(text, 'nvme0n1'), (300,700,9))
         self.assertIsNone(scope.disk_counters(text, 'sda'))
 
+    def test_net_counters(self):
+        text = ('Inter-|   Receive |  Transmit\n'
+                ' face |bytes packets errs drop fifo frame compressed multicast|bytes packets\n'
+                '    lo: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n'
+                '  eth0: 3000000 1 2 3 4 5 6 7 4000000 8 9 10 11 12 13 14\n')
+        self.assertEqual(scope.net_counters(text, 'eth0'), (3000000, 4000000))
+        self.assertIsNone(scope.net_counters(text, 'wlan0'))
+
+    def test_count_connections(self):
+        text = ('State Recv-Q Send-Q Local Address:Port Peer Address:Port\n'
+                'ESTAB 0 0 127.0.0.1:8080 127.0.0.1:55 users:(("x",pid=1,fd=2))\n'
+                'ESTAB 0 0 [::1]:8080 [::1]:56\n'
+                'ESTAB 0 0 127.0.0.1:9999 127.0.0.1:57\n'
+                'ESTAB 0 0 broken\n'
+                'SYN-SENT 0 1 127.0.0.1:58 127.0.0.1:8080\n')
+        self.assertEqual(scope.count_connections(text, 8080), 2)
+
+    def test_default_iface_skips_loopback_reject_route(self):
+        texts = {'/proc/net/route': 'Iface\tDestination\tGateway\tFlags\nlo\t00000000\t00000000\t0005\neth0\t00000000\t01CDA8C0\t0003\n'}
+        class FakePath:
+            def __init__(self, p): self.p = str(p)
+            def read_text(self): return texts[self.p]
+        with patch.object(scope, 'Path', FakePath):
+            self.assertEqual(scope.default_iface(), 'eth0')
+
+    def test_serve_port_detection(self):
+        d = Path(self.temp.name)
+        (d / 'run-x.sh').write_text('exec server.py "--port" "8123"\n')
+        self.assertEqual(scope.serve_port(d / 'strata-x.log'), 8123)
+        self.assertEqual(scope.serve_port(d / 'strata-missing.log'), 8080)
+
+    def test_sampler_net_and_conns(self):
+        texts = {
+            '/proc/pressure/io': 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=0\n',
+            '/proc/diskstats': '259 0 nvme0n1 1 2 300 4 5 6 700 8 9 10 11 0 0\n',
+            '/proc/meminfo': 'MemTotal: 1 kB\nDirty: 2 kB\nWriteback: 0 kB\n',
+            '/proc/net/dev': ' eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n',
+        }
+        class FakePath:
+            def __init__(self, p): self.p = str(p)
+            def read_text(self): return texts[self.p]
+        stop = threading.Event()
+        original = scope.record
+        def consume(ev):
+            original(ev)
+            stop.set()
+        run = SimpleNamespace(stdout='ESTAB 0 0 127.0.0.1:8080 127.0.0.1:1\nESTAB 0 0 127.0.0.1:8080 127.0.0.1:2\n')
+        with patch.object(scope, 'Path', FakePath), patch.object(scope.shutil, 'which', return_value='/usr/bin/ss'), patch.object(scope.subprocess, 'run', return_value=run), patch.object(scope, 'record', side_effect=consume):
+            scope.sampler(stop, iface='eth0', port=8080)
+        ev = scope.EVENTS[-1]
+        self.assertEqual(ev['conns'], 2)
+        self.assertEqual(ev['iface'], 'eth0')
+        self.assertIsNone(ev['net_rx_kbs'])  # first sample has no rate yet
+
     def test_tail_partial_rotation_truncation_and_missing_file(self):
         path = Path(self.temp.name) / 'engine.log'
         path.write_text('old\n')

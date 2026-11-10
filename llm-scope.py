@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import json
+import re
 import math
 import os
 from pathlib import Path
@@ -168,8 +169,64 @@ def disk_counters(text, device):
     return None
 
 
-def sampler(stop, device='nvme0n1', poll=2.0):
+def net_counters(text, iface):
+    """Receive/transmit byte counters for one interface from /proc/net/dev text."""
+    for line in text.splitlines():
+        name, _, rest = line.partition(':')
+        if name.strip() == iface:
+            fields = rest.split()
+            if len(fields) >= 9:
+                return int(fields[0]), int(fields[8])
+    return None
+
+
+def count_connections(text, port):
+    """Established TCP sockets whose local port equals port, from ss output text."""
+    total = 0
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and fields[0] == 'ESTAB':
+            try:
+                if int(fields[3].rsplit(':', 1)[1]) == port:
+                    total += 1
+            except ValueError:
+                continue
+    return total
+
+
+def default_iface():
+    """Interface carrying the default route, from /proc/net/route."""
+    try:
+        for line in Path('/proc/net/route').read_text().splitlines()[1:]:
+            fields = line.split()
+            # Destination 0.0.0.0/0 with the RTF_GATEWAY flag set; the loopback
+            # reject route shares the destination but lacks the flag.
+            if len(fields) > 3 and fields[1] == '00000000' and int(fields[3], 16) & 0x2:
+                return fields[0]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def serve_port(log_path):
+    """Engine serve port from the matching run script, else 8080."""
+    stem = log_path.stem
+    stem = stem[len('strata-'):] if stem.startswith('strata-') else stem
+    try:
+        m = re.search(r'--port["\']?(?:[=\s]+)["\']?(\d+)', (log_path.parent / f'run-{stem}.sh').read_text())
+        if m:
+            return int(m.group(1))
+    except OSError:
+        pass
+    return 8080
+
+
+def sampler(stop, device='nvme0n1', poll=2.0, iface=None, port=None):
     last = None
+    last_net = None
+    has_ss = port is not None and shutil.which('ss') is not None
+    if port is not None and not has_ss:
+        print('[llm-scope] ss unavailable; connection lane disabled')
     while not stop.is_set():
         try:
             psi = {}
@@ -184,13 +241,34 @@ def sampler(stop, device='nvme0n1', poll=2.0):
                 read = max(0, counters[0] - last[1][0]) * 512 / dt / 1e6
                 write = max(0, counters[1] - last[1][1]) * 512 / dt / 1e6
             last = (now, counters) if counters else None
+            rx = tx = None
+            if iface:
+                try:
+                    net = net_counters(Path('/proc/net/dev').read_text(), iface)
+                except OSError:
+                    net = None
+                if net and last_net:
+                    dt = now - last_net[0]
+                    if dt > 0:
+                        rx = max(0, net[0] - last_net[1][0]) / dt / 1e3
+                        tx = max(0, net[1] - last_net[1][1]) / dt / 1e3
+                last_net = (now, net) if net else None
+            conns = None
+            if has_ss:
+                try:
+                    # No `state established` filter: some ss versions then omit
+                    # the State column; count_connections filters on ESTAB.
+                    result = subprocess.run(['ss', '-tn'], capture_output=True, text=True, timeout=5, check=True)
+                    conns = count_connections(result.stdout, port)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    print(f'[llm-scope] connection sample failed: {exc}', file=sys.stderr)
             mem = {}
             for line in Path('/proc/meminfo').read_text().splitlines():
                 k, v = line.split(':', 1)
                 if k in ('Dirty', 'Writeback'):
                     mem[k] = int(v.split()[0]) / 1024
-            record(dict(type='sys', io_some=psi.get('some'), io_full=psi.get('full'), disk=device, disk_r_mbs=read, disk_w_mbs=write, in_flight=counters[2] if counters else None, dirty_mib=mem.get('Dirty'), writeback_mib=mem.get('Writeback')))
-        except (OSError, ValueError, KeyError) as exc:
+            record(dict(type='sys', io_some=psi.get('some'), io_full=psi.get('full'), disk=device, disk_r_mbs=read, disk_w_mbs=write, in_flight=counters[2] if counters else None, dirty_mib=mem.get('Dirty'), writeback_mib=mem.get('Writeback'), iface=iface, net_rx_kbs=rx, net_tx_kbs=tx, conns=conns))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             print(f'[llm-scope] system sample failed: {exc}', file=sys.stderr)
         stop.wait(poll)
 
@@ -266,6 +344,8 @@ def main():
     ap.add_argument('--monitor', help='use this GPU monitor log instead of nvidia-smi')
     ap.add_argument('--gpu', type=int, default=0)
     ap.add_argument('--disk', default='nvme0n1')
+    ap.add_argument('--iface', help='network interface for throughput sampling; default: interface of the default route')
+    ap.add_argument('--serve-port', type=int, help='engine serve port for connection counting; default: read from the engine run script, else 8080')
     ap.add_argument('--context-cap', type=int, default=65536, help='dashboard context limit; match engine configuration')
     ap.add_argument('--poll', type=float, default=2.0, help='system/GPU sampling seconds')
     args = ap.parse_args()
@@ -274,6 +354,8 @@ def main():
     CONTEXT_CAP = args.context_cap
     if args.poll < 0.2 or not math.isfinite(args.poll):
         ap.error('--poll must be finite and at least 0.2 seconds')
+    if args.serve_port is not None and not 1 <= args.serve_port <= 65535:
+        ap.error('--serve-port must be a valid port number')
     if args.log:
         DEFAULT_LOG = Path(args.log).expanduser()
     else:
@@ -282,11 +364,15 @@ def main():
         DEFAULT_LOG = preferred if preferred.exists() else max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
     if DEFAULT_LOG is None:
         ap.error('no engine log found; specify --log')
+    iface = args.iface or default_iface()
+    if args.iface is None and iface is None:
+        print('[llm-scope] no default-route interface found; network lane disabled')
+    port = args.serve_port or serve_port(DEFAULT_LOG)
     # Bind before starting collectors so a port conflict cannot write history.
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     load_history()
     stop = threading.Event()
-    jobs = [(engine_tail, (stop,)), (sampler, (stop, args.disk, args.poll))]
+    jobs = [(engine_tail, (stop,)), (sampler, (stop, args.disk, args.poll, iface, port))]
     jobs.append((monitor_tail, (Path(args.monitor).expanduser(), stop)) if args.monitor else (gpu_sampler, (stop, args.gpu, args.poll)))
     threads = [threading.Thread(target=fn, args=params, daemon=True) for fn, params in jobs]
     for thread in threads:
