@@ -16,3 +16,5 @@ secrets*
 *.log
 *.jsonl
 *.jsonl.*
+.pig/
+node_modules/

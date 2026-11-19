@@ -32,6 +32,23 @@ assert.ok(!elements.prompt.innerHTML.includes('<script>'));
 for(const el of Object.values(elements))assert.ok(!/NaN|undefined|Infinity/.test(el.innerHTML),el.innerHTML);
 vm.runInContext('events=[]; render();',sandbox);
 assert.ok(elements.prefill.innerHTML.includes('No measurements'));
+// Efficiency: power samples matched to the decode window only, ≥5 required.
+const out=vm.runInContext(`
+const T=Date.now()/1000;
+const gpus=[...Array(22)].map((_,i)=>({type:'gpu',ts:T-42+i*2,p:100}));
+gpus[0].p=500; gpus[0].ts=T-50; // before the 40s window
+gpus.push({type:'gpu',ts:T+9,p:500}); // beyond end+2 grace
+events=[{id:1,type:'done',ts:T,tok_s:50,tokens:2000,seconds:40},{id:2,type:'done',ts:T+100,tok_s:30,tokens:100,seconds:3}];
+const eff=effRecords(events.filter(e=>e.type==='done'),gpus);
+events=events.concat(gpus.slice(1)); render();
+eff`,sandbox);
+assert.equal(out[0].avg_w,100);
+assert.equal(out[0].j_tok,2);
+assert.equal(out[1].avg_w,null);
+assert.equal(out[1].j_tok,null);
+assert.ok(elements.eff.innerHTML.includes('<rect'));
+assert.ok(elements.eff.innerHTML.includes('W</text>'));
+assert.ok(!/NaN|undefined|Infinity/.test(elements.eff.innerHTML));
 // Large retained history must not use argument-spreading min/max.
 vm.runInContext("events=Array.from({length:50000},(_,i)=>({id:i,type:'sys',ts:Date.now()/1000-i,dirty_mib:i%100})); range=0; render();",sandbox);
 let calls=0;
@@ -45,5 +62,5 @@ sandbox.fetch=async url=>({ok:true,json:async()=>{
  await vm.runInContext('poll()',sandbox);
  assert.equal(vm.runInContext('cursor',sandbox),2);
  assert.equal(vm.runInContext('events.length',sandbox),2);
- console.log('Dashboard regression tests passed: scaling, prompt line, escaping, empty/null values, bounded history rendering, paginated polling.');
+ console.log('Dashboard regression tests passed: scaling, prompt line, escaping, empty/null values, efficiency windowing, bounded history rendering, paginated polling.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

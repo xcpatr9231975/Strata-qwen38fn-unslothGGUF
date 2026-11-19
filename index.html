@@ -8,6 +8,7 @@ body{margin:0;background:#0b0f14;color:#cdd6e0;font:13px/1.45 system-ui,sans-ser
 <header><h1>llm-scope · Strata / Qwen</h1><span id="state">loading…</span><span id="ranges"><button data-s="900">15m</button> <button data-s="3600" class="on">1h</button> <button data-s="21600">6h</button> <button data-s="0">all retained</button></span></header>
 <div class="tip">Strata prompt/prefill/decode metrics appear after each request finishes. Their positions are log observation times, not phase start times. GPU and system samples update independently. Multiple clients share this log; prompt drops do not prove compaction. Connection counts are TCP connections, not users, and no client addresses are stored. Hover points for details.</div>
 <div id="notice" class="tip"></div>
+<div id="eff-summary" class="tip"></div>
 <main id="lanes"></main>
 <script>
 'use strict';
@@ -21,6 +22,7 @@ const configs = [
  {id:'prompt',title:'PROMPT TOKENS / CONTEXT',unit:'tok',cap:true,series:[{type:'req',field:'prompt_tokens',color:'#7fd1a8',line:true,tip:e=>`Prompt ${fmt(e.prompt_tokens)} tokens · ${e.last_preview || ''}`} ]},
  {id:'prefill',title:'PREFILL · request summary',unit:'tok/s',series:[{type:'prefill_sum',field:'tok_s',color:'#e8b25e',bar:true,tip:e=>`${fmt(e.tok_s)} tok/s · ${fmt(e.tokens)} newly read tokens in ${fmt(e.ms)} ms${e.chunks != null ? ' · '+fmt(e.chunks)+' chunks' : ' · chunk count unknown'}`} ]},
  {id:'decode',title:'DECODE · request average (legacy phase samples when available)',unit:'tok/s',series:[{type:'done',field:'tok_s',color:'#cfe3ff',bar:true,tip:e=>`${fmt(e.tok_s)} tok/s · ${fmt(e.tokens)} generated tokens in ${fmt(e.seconds)} s · finish ${e.finish || 'unknown'}`},{type:'phase',field:'tok_s',color:'#7fb3ff',line:true,tip:e=>`${e.phase}: ${fmt(e.tok_s)} tok/s`}]},
+ {id:'eff',title:'DECODE EFFICIENCY · tok/s per request (left) vs GPU watts (right)',unit:'tok/s',series:[{type:'eff',field:'tok_s',color:'#8fd18f',bar:true,tip:e=>`${fmt(e.tok_s)} tok/s · ${fmt(e.tokens)} tokens in ${fmt(e.seconds)} s · ${e.avg_w==null?'fewer than 5 power samples in window':fmt(e.avg_w)+' W avg while decoding · '+fmt(e.j_tok)+' J/token'}`},{type:'gpu',field:'p',color:'#e08a5a',line:true,right:true,tip:e=>`GPU draw ${fmt(e.p)} W · ${fmt(e.u)}% util`}]},
  {id:'mtp',title:'MTP / SUFFIX DRAFT ACCEPTANCE · separate sources',unit:'%',max:100,series:[{type:'spec',field:'pct',filter:e=>e.source!=='suffix',color:'#66d9c4',tip:e=>`${e.source || 'legacy/unknown'} drafts: ${fmt(e.accepted)}/${fmt(e.drafts)} (${fmt(e.pct)}%)`},{type:'spec',field:'pct',filter:e=>e.source==='suffix',color:'#d8abff',tip:e=>`Suffix drafts: ${fmt(e.accepted)}/${fmt(e.drafts)} (${fmt(e.pct)}%)`} ]},
  {id:'expert',title:'DECODE EXPERT CACHE HIT RATE',unit:'%',max:100,series:[{type:'expert_cache',field:'hit_pct',color:'#8dbbff',tip:e=>`${fmt(e.hit_pct)}% · ${fmt(e.hits)} hits / ${fmt(e.lookups)} lookups`}]},
  {id:'kv',title:'KV BLOCK READS HITTING VRAM',unit:'%',max:100,series:[{type:'kv',field:'hit_pct',color:'#8dddbb',tip:e=>`${fmt(e.hit_pct)}% VRAM hits · ${fmt(e.blocks)} block reads · ${fmt(e.ram_mib)} MiB from RAM`}]},
@@ -42,35 +44,63 @@ for(const c of configs){
 for(const b of document.querySelectorAll('#ranges button')) b.onclick=()=>{
  range=Number(b.dataset.s); for(const x of document.querySelectorAll('#ranges button')) x.classList.toggle('on',x===b); render();
 };
+function effRecords(dones, gpus){
+ // Match each completed request with GPU power samples in [end-seconds, end+2s]; <5 samples stays null.
+ const gs=gpus.filter(e=>finite(e.p)).sort((a,b)=>a.ts-b.ts);
+ const ts=gs.map(e=>e.ts);
+ return dones.filter(e=>finite(e.tok_s)&&finite(e.seconds)&&finite(e.tokens)).map(e=>{
+  const hi=e.ts+2;
+  let lo=e.ts-e.seconds, i=0, j=ts.length;
+  while(i<j){const m=(i+j)>>1; if(ts[m]<lo)i=m+1; else j=m;}
+  let sum=0,n=0;
+  for(let k=i;k<ts.length && ts[k]<=hi;k++){sum+=gs[k].p;n++;}
+  return Object.assign({},e,{type:'eff',avg_w:n>=5?Math.round(sum/n*10)/10:null, j_tok:n>=5&&e.tok_s>0?Math.round(sum/n/e.tok_s*100)/100:null});
+ });
+}
+function summarize(eff){
+ const keep=eff.filter(e=>e.tokens>=200);
+ const t=keep.map(e=>e.tok_s).sort((a,b)=>a-b);
+ if(!t.length){$('eff-summary').textContent='Decode efficiency: no completed requests of 200+ tokens in this window.';return;}
+ const med=a=>a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2;
+ const p90=a=>a[Math.min(a.length-1,Math.ceil(.9*a.length)-1)];
+ const w=keep.filter(e=>finite(e.avg_w));
+ $('eff-summary').textContent=`Decode efficiency (this window, requests ≥ 200 tokens): peak ${fmt(t[t.length-1])} · p90 ${fmt(p90(t))} · median ${fmt(med(t))} tok/s`+
+  (w.length?` · ${w.length} matched power windows · ${w.reduce((s,e)=>s+e.avg_w,0)/w.length} W avg while decoding · ${fmt(med(w.map(e=>e.j_tok).sort((a,b)=>a-b)))} J/token median`:' · no power samples matched in this window');
+}
 function renderLane(c, visible, tmin, tmax){
  const svg=$(c.id), W=Math.max(320,innerWidth-28), H=125, left=78, right=W-12, top=16, bottom=H-20;
  svg.setAttribute('width',W); svg.setAttribute('height',H);
  const groups=c.series.map(s=>({s,points:visible.filter(e=>e.type===s.type && (!s.filter || s.filter(e))).map(e=>({e,y:s.field===null?5:e[s.field]})).filter(p=>finite(p.y))}));
- let peak=1, count=0;
- for(const g of groups) for(const p of g.points){peak=Math.max(peak,p.y);count++;}
+ let peak=1, count=0, rpeak=1;
+ for(const g of groups){const ref=g.s.right?((a,b)=>rpeak=Math.max(rpeak,b)):(a,b)=>{if(b>a)peak=b;}; for(const p of g.points){ref(0,p.y);count++;}}
  const max=c.cap?Math.max(contextCap,peak)*1.1:(c.max || peak*1.15);
- const X=t=>left+(t-tmin)/(tmax-tmin)*(right-left), Y=v=>bottom-Math.max(0,Math.min(1,v/max))*(bottom-top);
+ const rmax=rpeak*1.15;
+ const X=t=>left+(t-tmin)/(tmax-tmin)*(right-left), Y=v=>bottom-Math.max(0,Math.min(1,v/max))*(bottom-top), YR=v=>bottom-Math.max(0,Math.min(1,v/rmax))*(bottom-top);
  let html='';
  for(const value of [0,max/2,max]) html+=`<line x1="${left}" y1="${Y(value)}" x2="${right}" y2="${Y(value)}" stroke="#263342"/><text x="4" y="${Y(value)-2}">${esc(fmt(value))} ${esc(c.unit)}</text>`;
+ if(groups.some(g=>g.s.right&&g.points.length)) for(const value of [0,rmax/2,rmax]) html+=`<text x="${right-34}" y="${YR(value)-2}" fill="#e08a5a">${esc(fmt(value))} W</text>`;
  if(c.cap) html+=`<line x1="${left}" y1="${Y(contextCap)}" x2="${right}" y2="${Y(contextCap)}" stroke="#e0556a" stroke-dasharray="6 4"><title>Configured context cap: ${contextCap}</title></line>`;
  for(const {s,points} of groups){
-  if(s.line && points.length>1) html+=`<polyline fill="none" stroke="${s.color}" points="${points.map(p=>X(p.e.ts)+','+Y(p.y)).join(' ')}"/>`;
+  const yy=s.right?YR:Y;
+  if(s.line && points.length>1) html+=`<polyline fill="none" stroke="${s.color}" points="${points.map(p=>X(p.e.ts)+','+yy(p.y)).join(' ')}"/>`;
   for(const p of points){
    const title=`<title>${esc(s.tip(p.e))} · ${esc(new Date(p.e.ts*1000).toLocaleTimeString())}</title>`;
-   html+=s.bar?`<rect x="${X(p.e.ts)-3}" y="${Y(p.y)}" width="6" height="${Math.max(1,bottom-Y(p.y))}" fill="${s.color}">${title}</rect>`:`<circle cx="${X(p.e.ts)}" cy="${Y(p.y)}" r="3" fill="${s.color}">${title}</circle>`;
+   html+=s.bar?`<rect x="${X(p.e.ts)-3}" y="${yy(p.y)}" width="6" height="${Math.max(1,bottom-yy(p.y))}" fill="${s.color}">${title}</rect>`:`<circle cx="${X(p.e.ts)}" cy="${yy(p.y)}" r="3" fill="${s.color}">${title}</circle>`;
   }
  }
  if(!count) html+=`<text x="${left+12}" y="58">No measurements in this window</text>`;
  html+=`<text x="${left}" y="${H-4}">${esc(new Date(tmin*1000).toLocaleTimeString())}</text><text x="${right-64}" y="${H-4}">${esc(new Date(tmax*1000).toLocaleTimeString())}</text>`;
  svg.innerHTML=html;
- let latest=null; for(const g of groups) for(const p of g.points) if(!latest || p.e.id>latest.e.id) latest=p;
+ let latest=null; for(const p of groups[0].points) if(!latest || p.e.id>latest.e.id) latest=p;
  $(c.id+'-latest').textContent=latest && c.unit ? 'latest '+fmt(latest.y)+' '+c.unit : '';
 }
 function render(){
  const now=Date.now()/1000, cut=range?now-range:0;
  const visible=events.filter(e=>finite(e.ts)&&e.ts>=cut&&e.ts<=now);
  let tmin=now-60; if(range)tmin=now-range; else for(const e of visible)tmin=Math.min(tmin,e.ts);
- for(const c of configs)renderLane(c,visible,tmin,now);
+ const eff=effRecords(visible.filter(e=>e.type==='done'),visible.filter(e=>e.type==='gpu'));
+ summarize(eff);
+ for(const c of configs)renderLane(c,c.id==='eff'?visible.concat(eff):visible,tmin,now);
 }
 async function poll(){
  if(busy)return; busy=true;

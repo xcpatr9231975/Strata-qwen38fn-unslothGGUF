@@ -14,6 +14,39 @@ prefill and decode use per-request bars. A lane without matching samples shows
 controlled performance benchmark. The screenshot contains no credentials,
 network addresses or personal usernames.*
 
+## Demo capture
+
+[![Headless capture of the dashboard during a live generation](assets/demo.png)](assets/demo.webm)
+
+*50-second headless Chromium capture of a live request (`tools/capture/capture.js`
+records video and a still during a real generation): a **typical sustained run of
+42.9 tok/s; the peak in the retained logs is 49.9 tok/s**. On a warm laptop GPU sustained
+decode settles at 39–45 tok/s; approaching 50 is a tail event, usually on cooler or shorter
+runs.*
+
+## Decode throughput and power
+
+Peak sustained decode: **49.9 tok/s at 105.9 W — 2.12 J/token** (GPU-only).
+
+```text
+$ python3 bench.py
+prefill:        median 269 tok/s · peak 1552 tok/s (218 requests)
+decode requests kept: 154 (>= 200 generated tokens, >= 5 GPU power samples in window)
+peak decode:    49.9 tok/s (406 tokens, 105.9 W, 2.12 J/token)
+p90 decode:     44.9 tok/s
+median decode:  39.3 tok/s
+W during decode: median 104.1 W
+energy:         median 2.59 J/token · best 1.33 J/token
+GPU idle draw:  13.6 W
+```
+
+Method — identical to the dashboard's Decode efficiency lane, so this command and
+the chart can never disagree: a request counts when its `done` event has ≥ 200
+generated tokens and ≥ 5 GPU power samples fall in its window (`[end − seconds,
+end + 2 s]`); watts come from `nvidia-smi`/NVML and are GPU-only — CPU, RAM and
+screen are not included. Re-run `python3 bench.py` against the retained
+`data/events.jsonl*` to regenerate every number above.
+
 ## Inference engine and model
 
 | Component | Reference setup |
@@ -84,6 +117,7 @@ appropriate firewall/authenticated proxy. Logs can contain sensitive text.
 | Prompt/context | Request prompt size, connected as a line; dashed red reference is `--context-cap` (match your engine configuration) |
 | Prefill | Newly read tokens/second, amber bars and latest numeric value; reused tokens are not counted as newly processed tokens |
 | Decode | Generated tokens/second averaged over a completed request; legacy Maya phase samples are also supported |
+| Decode efficiency | Per-request tok/s bars (left axis) with mean GPU watts over the same window overlaid (right axis); requests with < 5 power samples in the window show no bar |
 | MTP / suffix | Distinct colored draft acceptance points, not one conflated series |
 | Expert cache | Decode expert-cache hit percentage |
 | KV | Block reads hitting VRAM, with RAM transfer details in tooltips |
